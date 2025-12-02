@@ -1,12 +1,18 @@
 using System.Globalization;
+using System.Net.Http.Json;
+using System.Threading.Tasks;
 
 namespace FileOrganizerDesktop;
 
 public partial class Form1 : Form
 {
+
+    private readonly HttpClient _http;
     public Form1()
     {
         InitializeComponent();
+        //TODO implement appsettings to register port
+        _http = new HttpClient { BaseAddress = new Uri("http://localhost:5888/") };
     }
 
     private void btnOrigin_Click(object sender, EventArgs e)
@@ -27,7 +33,7 @@ public partial class Form1 : Form
         }
     }
 
-    private void btnProcess_Click(object sender, EventArgs e)
+    private async void btnProcess_Click(object sender, EventArgs e)
     {
         lstLog.Items.Clear();
 
@@ -47,129 +53,36 @@ public partial class Form1 : Form
             return;
         }
 
-        if (!Directory.Exists(outputDir))
-            Directory.CreateDirectory(outputDir);
-
-        OrganizeFiles(inputDir, outputDir, extension);
-    }
-
-    private void OrganizeFiles(string inputDir, string outputDir, string extension)
-    {
-        var files = GetFilesSafe(inputDir, "*.*");
-
-        foreach (var file in files)
-        {
-            try
-            {
-                if (Path.GetExtension(file).Equals(extension, StringComparison.OrdinalIgnoreCase))
-                {
-                    FileInfo info = new FileInfo(file);
-
-                    string fileNameWithoutExt = Path.GetFileNameWithoutExtension(file);
-                    string fileExtension = info.Extension;
-
-                    DateTime creation = info.LastWriteTime;
-                    string creationDate = creation.ToString("dd-MM-yyyy");
-
-                    string newFileName = $"{fileNameWithoutExt}_{creationDate}{fileExtension}";
-
-                    string yearFolder = creation.Year.ToString();
-                    string monthFolder = creation.ToString("MMM", new CultureInfo("pt-BR"));
-
-                    string finalFolder = Path.Combine(outputDir, yearFolder, monthFolder);
-                    Directory.CreateDirectory(finalFolder);
-
-                    string destinationPath = Path.Combine(finalFolder, newFileName);
-
-                    if (File.Exists(destinationPath))
-                    {
-                        finalFolder = Path.Combine(finalFolder, "Duplicados");
-                        if (!Directory.Exists(finalFolder))
-                            Directory.CreateDirectory(finalFolder);
-                        destinationPath = Path.Combine(finalFolder, newFileName);
-                    }
-
-                    File.Copy(file, destinationPath, true);
-
-                    lstLog.Items.Add($"Copiado: {destinationPath}");
-
-                    File.Delete(file);
-
-                    if (!File.Exists(file))
-                        lstLog.Items.Add($"Arquivo {file} deletado do diretório de origem");
-                    else
-                        lstLog.Items.Add($"Falha ao tentar deletar o arquivo {file} deletado do diretório de origem");
-                }
-            }
-            catch (Exception ex)
-            {
-                lstLog.Items.Add($"Erro: {ex.Message}");
-            }
-        }
-
-        MessageBox.Show("Processo concluído!");
-    }
-
-
-    private IEnumerable<string> GetFilesSafe(string path, string filter)
-    {
-        var files = new List<string>();
+        btnProcess.Enabled = false;
 
         try
         {
-            files.AddRange(Directory.GetFiles(path, filter));
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            foreach (var dir in Directory.GetDirectories(path))
+            var request = new { InputDir = inputDir, OutputDir = outputDir, Extension = extension, Overwrite = true };
+            var resp = await _http.PostAsJsonAsync("api/process", request);
+            if (!resp.IsSuccessStatusCode)
             {
-                files.AddRange(GetFilesSafe(dir, filter));
+                var txt = await resp.Content.ReadAsStringAsync();
+                MessageBox.Show("Erro do serviço: " + txt);
+                return;
             }
+
+            var logs = await resp.Content.ReadFromJsonAsync<string[]>();
+            foreach (var l in logs) lstLog.Items.Add(l);
+
         }
-        catch
+        catch (Exception ex)
         {
+            MessageBox.Show("Falha ao conectar ao serviço: " + ex.Message);
         }
-
-        return files;
+        finally
+        {
+            btnProcess.Enabled = true;
+        }
     }
-
 
     private void Form1_Load(object sender, EventArgs e)
     {
 
-    }
-
-    private int RemoveEmptyDirectories(string dir)
-    {
-        int removed = 0;
-
-        foreach (var subdir in Directory.GetDirectories(dir))
-        {
-            removed += RemoveEmptyDirectories(subdir);
-        }
-
-        bool whitoutFiles = Directory.GetFiles(dir).Length == 0;
-        bool whitoutDirectories = Directory.GetDirectories(dir).Length == 0;
-
-        if (whitoutFiles && whitoutDirectories)
-        {
-            try
-            {
-                Directory.Delete(dir);
-                lstLog.Items.Add("Pasta removida: " + dir);
-                removed++;
-            }
-            catch (Exception ex)
-            {
-                lstLog.Items.Add("Erro ao remover: " + dir + " -> " + ex.Message);
-            }
-        }
-
-        return removed;
     }
 
     private void btnSelectCleaning_Click(object sender, EventArgs e)
@@ -184,7 +97,7 @@ public partial class Form1 : Form
         }
     }
 
-    private void btnCleanDiretctories_Click(object sender, EventArgs e)
+    private async void btnCleanDiretctories_Click(object sender, EventArgs e)
     {
         lstLog.Items.Clear();
 
@@ -196,16 +109,32 @@ public partial class Form1 : Form
 
         string rootDir = lblDirCleaning.Tag.ToString();
 
-        if (!Directory.Exists(rootDir))
+        btnCleanDirectories.Enabled = false;
+
+        try
         {
-            MessageBox.Show("O diretório informado não existe!");
-            return;
+            var request = new { RootPath = rootDir };
+            var resp = await _http.PostAsJsonAsync("api/clean", request);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var txt = await resp.Content.ReadAsStringAsync();
+                MessageBox.Show("Erro do serviço: " + txt);
+                return;
+            }
+            var result = await resp.Content.ReadFromJsonAsync<CleanResultDTO>();
+            foreach (var l in result.Logs) lstLog.Items.Add(l);
+            MessageBox.Show($"Concluído. Pastas removidas: {result.Removed}");
         }
-
-        int quantityRemoved = RemoveEmptyDirectories(rootDir);
-
-        MessageBox.Show($"Processo concluído!\nPastas vazias excluídas: {quantityRemoved}");
+        catch (Exception ex)
+        {
+            MessageBox.Show("Falha ao conectar ao serviço: " + ex.Message);
+        }
+        finally
+        {
+            btnCleanDirectories.Enabled = true;
+        }
     }
 
+    private record CleanResultDTO(int Removed, string[] Logs);
 
 }
